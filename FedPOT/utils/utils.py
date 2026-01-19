@@ -6,15 +6,14 @@ from PIL import Image
 from collections import OrderedDict
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, Subset, ConcatDataset
+from torch.utils.data import Subset
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from torchvision.datasets import MNIST
 from torchvision import transforms
 import torchvision.models as models
 from scipy.ndimage.interpolation import rotate as scipyrotate
-from utils.image_synthesizer import Synthesizer
-from utils.networks import VGG16
+from torchvision.models import vgg16
 from copy import deepcopy
 from random import choice
 from tqdm import tqdm
@@ -24,31 +23,27 @@ import csv
 import os
 import math
 
-def load_users(args, trains, labels1, labels2, size_m, targets, datasets, num_classes):
-    datas = []
-
+def load_users(args, trains, labels1, labels2, data_size, targets, datasets, num_classes):
     if trains:
 
-        if args.distribution in ["same-same", "same-different"]:
-            print("iid")
+        if args.distribution in ["class-uniform", "quantity-skewed"]:
             all_index = []
 
             for l in range(num_classes):
-                temp_indexes = list(np.where(np.array(targets) == l)[0])
+                select_indexes = list(np.where(np.array(targets) == l)[0])
 
-                index = random.sample(temp_indexes, int(size_m // num_classes))
+                index = random.sample(select_indexes, int(data_size // num_classes))
 
                 all_index.extend(index)
 
             datas = Subset(datasets, all_index)
         else:
-            print("non-iid")
 
             all_index = []
             for l in [labels1, labels2]:
-                temp_indexes = list(np.where(np.array(targets) == l)[0])
+                select_indexes = list(np.where(np.array(targets) == l)[0])
 
-                index = random.sample(temp_indexes, int(size_m * 0.4))
+                index = random.sample(select_indexes, int(data_size * 0.4))
 
                 all_index.extend(index)
 
@@ -59,7 +54,7 @@ def load_users(args, trains, labels1, labels2, size_m, targets, datasets, num_cl
                 if (index not in counts) and (targets[index] not in [labels1, labels2]):
                     all_index.append(index)
 
-                if len(all_index) == size_m:
+                if len(all_index) == data_size:
                     break
 
             datas = Subset(datasets, all_index)
@@ -75,8 +70,6 @@ def load_users(args, trains, labels1, labels2, size_m, targets, datasets, num_cl
         datas = Subset(datasets, all_index)
 
         return datas
-
-    print(len(datas))
 
     return datas
 
@@ -152,18 +145,18 @@ def get_dataset(size_list, dataset, users, data_path, args):
     return channel, im_size, num_classes, whole_train
 
 
-def eval_net(args, server_state, channel, num_classes, evalloader):
+def eval_net(model_state, evalloader):
     criterion = nn.CrossEntropyLoss().cuda()
-    net = get_network(args.model, channel, num_classes, args)
+    net = vgg16()
     net.eval()
 
-    net.load_state_dict(server_state)
+    net.load_state_dict(model_state)
 
-    loss_real, acc_real = epoch('eval', evalloader, net, None, criterion, args)
+    loss_real, acc_real = epoch('eval', evalloader, net, None, criterion)
 
     return loss_real, acc_real
 
-
+# fedavg
 def fedavg(size_list, local_model_list):
     next_state = OrderedDict()
     whole_sizes = 0
@@ -193,7 +186,7 @@ def get_agg(size_list, local_model_list):
 def fl(args, channel, num_classes, dataset, server_state):
     criterion = nn.CrossEntropyLoss().cuda()
 
-    net = get_network(args.model, channel, num_classes, args)
+    net = vgg16()
     
     model_list = []
 
@@ -203,29 +196,19 @@ def fl(args, channel, num_classes, dataset, server_state):
         net.train()
         
         optimizer_net = torch.optim.Adam(net.parameters(), lr=args.lr_net)
-
         optimizer_net.zero_grad()
 
         for inol in range(args.inner_loops):
             net.train()
-            epoch('train', dataset[i], net, optimizer_net, criterion, args)
+            epoch('train', dataset[i], net, optimizer_net, criterion)
         net.eval()
         
         model_list.append(net)
     
     return model_list
 
-def get_network(model, channel, num_classes, args):
-    if model == 'VGG16':
-        net = VGG16(channel=channel, num_classes=num_classes)
-    else:
-        net = None
-        exit('unknown model: %s'% model)
 
-    return net
-
-
-def epoch(mode, dataloader, net, optimizer, criterion, args):
+def epoch(mode, dataloader, net, optimizer, criterion):
     loss_avg, acc_avg, num_exp = 0, 0, 0
 
     net = net.cuda()
@@ -236,17 +219,15 @@ def epoch(mode, dataloader, net, optimizer, criterion, args):
 
         for step, batch in enumerate(dataloader):
             optimizer.zero_grad()
-            # print(step, num_exp)
-            with autocast():
 
-                img = batch[0].cuda()
-                lab = batch[1].long().cuda()
-                n_b = lab.shape[0]
+            img = batch[0].cuda()
+            lab = batch[1].long().cuda()
+            n_b = lab.shape[0]
 
-                output = net(img)
-                loss = criterion(output, lab)
+            output = net(img)
+            loss = criterion(output, lab)
 
-                acc = np.sum(np.equal(np.argmax(output.cpu().data.numpy(), axis=-1), lab.cpu().data.numpy()))
+            acc = np.sum(np.equal(np.argmax(output.cpu().data.numpy(), axis=-1), lab.cpu().data.numpy()))
 
             loss_avg += loss.item() * n_b
             acc_avg += acc
@@ -261,21 +242,20 @@ def epoch(mode, dataloader, net, optimizer, criterion, args):
 
         with torch.no_grad():
             for step, batch in enumerate(dataloader):
-                with autocast():
-                    net.eval()
+                net.eval()
 
-                    img = batch[0].cuda()
-                    lab = batch[1].long().cuda()
-                    n_b = lab.shape[0]
+                img = batch[0].cuda()
+                lab = batch[1].long().cuda()
+                n_b = lab.shape[0]
 
-                    output = net(img)
-                    loss = criterion(output, lab)
+                output = net(img)
+                loss = criterion(output, lab)
 
-                    acc = np.sum(np.equal(np.argmax(output.cpu().data.numpy(), axis=-1), lab.cpu().data.numpy()))
+                acc = np.sum(np.equal(np.argmax(output.cpu().data.numpy(), axis=-1), lab.cpu().data.numpy()))
 
-                    loss_avg += loss.item() * n_b
-                    acc_avg += acc
-                    num_exp += n_b
+                loss_avg += loss.item() * n_b
+                acc_avg += acc
+                num_exp += n_b
 
     loss_avg /= num_exp
     acc_avg /= num_exp

@@ -4,16 +4,13 @@ import argparse
 import numpy as np
 import torch
 from collections import OrderedDict
-from utils.utils import fl, get_dataset, get_network, eval_net, load_args, get_test_dataset, get_agg
-from utils.image_synthesizer import Synthesizer
+from utils.utils import fl, get_dataset, eval_net, load_args, get_test_dataset, get_agg
 from incentive.incentive import get_reward, train_fraud_attacker
+from torchvision.models import vgg16
 import matplotlib
 import copy
 import math
 from itertools import combinations
-from warnings import simplefilter
-
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from copy import deepcopy
 import torch.nn as nn
@@ -28,13 +25,13 @@ def main(args):
     testloader = torch.utils.data.DataLoader(dst_test, batch_size=args.batch_eval)
 
     channel, num_classes, dst_val = get_test_dataset(args.dataset, False, args.data_path, args)
-    valloader = torch.utils.data.DataLoader(dst_test, batch_size=args.batch_eval)
+    valloader = torch.utils.data.DataLoader(dst_val, batch_size=args.batch_eval)
 
-    net = get_network(args.model, channel, num_classes, args)
+    net = vgg16()
     net.train()
     start_state = net.state_dict()
 
-    _, acc_ori = eval_net(args, start_state, channel, num_classes, testloader)
+    _, acc_ori = eval_net(start_state, testloader)
     print("Original Server Accuracy: %.4f" % acc_ori)
 
     # data distribution
@@ -68,7 +65,7 @@ def main(args):
 
         server_honest_state = get_agg(size_list, local_model_list)
 
-        _, acc_real = eval_net(args, server_honest_state, channel, num_classes, testloader)
+        _, acc_real = eval_net(server_honest_state, testloader)
         print("Global Accuracy when Honest = %.4f" % (acc_real))
 
         honest_rewards_list = get_reward(args, last_server_state,
@@ -126,7 +123,7 @@ def main(args):
 
         server_fraud_state, ex_pa = get_agg(size_list, local_model_list)
 
-        _, acc_fraud = eval_net(args, server_fraud_state, channel, num_classes, testloader)
+        _, acc_fraud = eval_net(server_fraud_state, testloader)
         print("Global Accuracy after RFA = %.4f" % (acc_fraud))
 
         fraud_rewards_list = get_reward(args, last_server_state, size_list,
@@ -168,11 +165,6 @@ def main(args):
 
 
 if __name__ == '__main__':
-    import time
-
-    # set_seed(2021)
-    simplefilter(action='ignore', category=UserWarning)
-    simplefilter(action='ignore', category=FutureWarning)
     parser = argparse.ArgumentParser(description='Parameter Processing')
     parser.add_argument('--gpu', type=str, default="0", help='number of the gpu device')
 

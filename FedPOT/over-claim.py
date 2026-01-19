@@ -3,23 +3,15 @@ import random
 import argparse
 import numpy as np
 import torch
-from collections import OrderedDict
-from utils.utils import fl, get_dataset, get_network, eval_net, get_test_dataset, get_agg
-from utils.image_synthesizer import Synthesizer
+from utils.utils import fl, get_dataset, eval_net, get_test_dataset, get_agg
+from torchvision.models import vgg16
 from incentive.incentive import get_reward, train_fraud_attacker
-from utils.features import features
 import matplotlib
 import copy
 import math
-from itertools import combinations
-from warnings import simplefilter
-
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from copy import deepcopy
 import torch.nn as nn
-from utils.condensation import condensation
-from utils.condensation_utils import TensorDataset
 
 
 def main(args):
@@ -29,13 +21,13 @@ def main(args):
     testloader = torch.utils.data.DataLoader(dst_test, batch_size=args.batch_eval)
 
     channel, num_classes, dst_val = get_test_dataset(args.dataset, False, args.data_path, args)
-    valloader = torch.utils.data.DataLoader(dst_test, batch_size=args.batch_eval)
+    valloader = torch.utils.data.DataLoader(dst_val, batch_size=args.batch_eval)
 
-    net = get_network(args.model, channel, num_classes, args)
+    net = vgg16()
     net.train()
     start_state = net.state_dict()
 
-    _, acc_ori = eval_net(args, start_state, channel, num_classes, testloader)
+    _, acc_ori = eval_net(start_state, testloader)
     print("Original Server Accuracy: %.4f" % acc_ori)
 
     # data distribution
@@ -60,16 +52,16 @@ def main(args):
     communication_loops = 1
     last_server_state = deepcopy(start_state)
 
-    per_flops = 1 # FLOPs per one sample for one epoch, decided by model structure
+    per_flops = 1 # FLOPs per one sample of one epoch, decided by model structure
 
     while True:
-        print(", Iteration = %d, data size = %.2f/%.2f" % (communication_loops, args.train_size, args.claim_size))
+        print("Iteration = %d, data size = %.2f/%.2f" % (communication_loops, args.train_size, args.claim_size))
 
         local_model_list = fl(args, channel, num_classes, realloader_list, testloader, last_server_state)
 
         server_honest_state = get_agg(args, size_list, local_model_list)
 
-        _, acc_real = eval_net(args, server_honest_state, channel, num_classes, testloader)
+        _, acc_real = eval_net(server_honest_state, testloader)
         print("Global Accuracy when Honest = %.4f" % (acc_real))
 
         honest_rewards_list = get_reward(args, last_server_state,
@@ -107,8 +99,7 @@ def main(args):
             if fraud_rewards_list[f] > 0:
                 fraud_rewards = fraud_rewards_list[f] / whole_fraud
 
-            fraud_reward_cost_ratio = ((fraud_rewards * 100) / real_cost - (
-                    honest_rewards * 100) / real_cost) * pow(10, 12)
+            fraud_reward_cost_ratio = (fraud_rewards * 100 / real_cost - honest_rewards * 100 / real_cost) * pow(10, 12)
 
             whole_fraud_rewards_list[f] = fraud_reward_cost_ratio
 
@@ -123,7 +114,7 @@ def main(args):
 
         server_fraud_state, ex_pa = get_agg(args, claim_size_list, local_model_list)
 
-        _, acc_fraud = eval_net(args, server_fraud_state, channel, num_classes, testloader)
+        _, acc_fraud = eval_net(server_fraud_state, testloader)
         print("Global Accuracy after RFA = %.4f" % (acc_fraud))
         
         fraud_rewards_list = get_reward(args, last_server_state, claim_size_list,
@@ -152,10 +143,10 @@ def main(args):
                 (i, honest_rewards, fraud_rewards, rcr_increase))
 
         #################################################################################
-        # Update the Global Model after RFA
-        last_server_state = deepcopy(server_fraud_state)
+        # Update the global model after RFA
+        # last_server_state = deepcopy(server_fraud_state)
         #################################################################################
-        # Update the Global Model when Honest
+        # Update the global model when all honest
         last_server_state = deepcopy(server_honest_state)
         
         if communication_loops == args.global_loops:
@@ -164,11 +155,6 @@ def main(args):
         communication_loops += 1
 
 if __name__ == '__main__':
-    import time
-
-    # set_seed(2021)
-    simplefilter(action='ignore', category=UserWarning)
-    simplefilter(action='ignore', category=FutureWarning)
     parser = argparse.ArgumentParser(description='Parameter Processing')
     parser.add_argument('--gpu', type=str, default="0", help='number of the gpu device')
 
@@ -200,10 +186,6 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=2026, help='local update loop')
 
     args = parser.parse_args()
-    import shutil
-
-    i = 0
-    args = load_args(args)
 
     main(deepcopy(args))
 
